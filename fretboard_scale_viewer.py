@@ -8,6 +8,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+from matplotlib.patches import Rectangle
 from matplotlib.widgets import Button
 
 
@@ -48,10 +49,26 @@ NOTE_TO_PITCH = {
     "B": 11,
     "Cb": 11,
 }
+PITCH_TO_ENHARMONIC_LABEL = {
+    0: "C",
+    1: "C#/Db",
+    2: "D",
+    3: "D#/Eb",
+    4: "E",
+    5: "F",
+    6: "F#/Gb",
+    7: "G",
+    8: "G#/Ab",
+    9: "A",
+    10: "A#/Bb",
+    11: "B",
+}
 LETTER_TO_PITCH = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 LETTER_ORDER = ["C", "D", "E", "F", "G", "A", "B"]
 DISPLAY_MODES = ["Notes", "Intervals", "Chords"]
 ROMAN_NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII"]
+INSTRUMENTS = ["guitar", "piano"]
+WHITE_PITCHES = {0, 2, 4, 5, 7, 9, 11}
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,16 @@ class ChordDefinition:
 class ChordPosition:
     strings: tuple[int, ...]
     frets: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PianoKey:
+    midi: int
+    pitch: int
+    octave: int
+    is_white: bool
+    x: float
+    label: str
 
 
 def parse_scale_reference(path: Path) -> tuple[list[str], dict[tuple[str, str, str], ScaleDefinition]]:
@@ -131,6 +158,13 @@ def note_to_pitch(note: str) -> int:
         return NOTE_TO_PITCH[note]
     except KeyError as exc:
         raise ValueError(f"Unsupported note spelling: {note}") from exc
+
+
+def pitch_to_display_label(pitch: int) -> str:
+    try:
+        return PITCH_TO_ENHARMONIC_LABEL[pitch]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported pitch class: {pitch}") from exc
 
 
 def split_note(note: str) -> tuple[str, str]:
@@ -271,6 +305,49 @@ def generate_chord_positions(chord: ChordDefinition, max_fret: int) -> list[Chor
         if len(unique) == 4:
             break
     return unique
+
+
+def build_piano_keys(start_midi: int, octaves: int) -> list[PianoKey]:
+    white_positions: dict[int, float] = {}
+    keys: list[PianoKey] = []
+    white_index = 0
+
+    for midi in range(start_midi, start_midi + octaves * 12 + 1):
+        pitch = midi % 12
+        octave = (midi // 12) - 1
+        if pitch in WHITE_PITCHES:
+            white_positions[midi] = float(white_index)
+            keys.append(
+                PianoKey(
+                    midi=midi,
+                    pitch=pitch,
+                    octave=octave,
+                    is_white=True,
+                    x=float(white_index),
+                    label=f"{pitch_to_display_label(pitch)}{octave}",
+                )
+            )
+            white_index += 1
+
+    for midi in range(start_midi, start_midi + octaves * 12 + 1):
+        pitch = midi % 12
+        if pitch in WHITE_PITCHES:
+            continue
+        octave = (midi // 12) - 1
+        left_x = white_positions[midi - 1]
+        keys.append(
+            PianoKey(
+                midi=midi,
+                pitch=pitch,
+                octave=octave,
+                is_white=False,
+                x=left_x + 0.68,
+                label=f"{pitch_to_display_label(pitch)}{octave}",
+            )
+        )
+
+    keys.sort(key=lambda key: (key.is_white, key.midi))
+    return keys
 
 
 class FretboardScaleViewer:
@@ -430,23 +507,34 @@ class FretboardScaleViewer:
             open_marker_edge = "#641220" if open_is_root else "#155e63" if open_in_scale else "#4f3422"
             open_string_marker = Circle(
                 (-0.18, y),
-                0.11,
+                0.18,
                 facecolor=open_marker_face,
                 edgecolor=open_marker_edge,
                 linewidth=1.4,
                 zorder=2,
             )
             self.ax.add_patch(open_string_marker)
+            if open_in_scale:
+                if self.current_display_mode() == "Intervals":
+                    open_label = interval_lookup[open_pitch]
+                elif self.current_display_mode() == "Chords":
+                    open_label = interval_label(
+                        active_chord.notes[0],
+                        self._preferred_label_for_pitch(open_pitch, active_chord.notes),
+                    )
+                else:
+                    open_label = pitch_to_display_label(open_pitch)
+                self.ax.text(-0.18, y, open_label, ha="center", va="center", fontsize=8, color="white", zorder=4)
 
         for string_index, open_note in enumerate(STANDARD_TUNING_8_STRING):
             open_pitch = note_to_pitch(open_note)
-            for fret in range(self.frets + 1):
+            for fret in range(1, self.frets + 1):
                 pitch = (open_pitch + fret) % 12
                 highlight_pitches = active_chord_pitches if self.current_display_mode() == "Chords" else scale_pitch_classes
                 if pitch not in highlight_pitches:
                     continue
 
-                x = 0.3 if fret == 0 else fret - 0.5
+                x = fret - 0.5
                 y = string_index
                 is_root = pitch == active_root_pitch
                 facecolor = "#d94841" if is_root else "#2a9d8f"
@@ -456,12 +544,12 @@ class FretboardScaleViewer:
                 elif self.current_display_mode() == "Chords":
                     note_name = interval_label(active_chord.notes[0], self._preferred_label_for_pitch(pitch, active_chord.notes))
                 else:
-                    note_name = self._preferred_label_for_pitch(pitch, scale.notes)
-                radius = 0.18 if fret == 0 else 0.23
+                    note_name = pitch_to_display_label(pitch)
+                radius = 0.23
 
                 marker = Circle((x, y), radius, facecolor=facecolor, edgecolor=edgecolor, linewidth=1.5, zorder=3)
                 self.ax.add_patch(marker)
-                self.ax.text(x, y, note_name, ha="center", va="center", fontsize=8, color="white", zorder=4)
+                self.ax.text(x, y, note_name, ha="center", va="center", fontsize=8, color="black", zorder=4)
 
         formula_text = "  ".join(interval_label(scale.notes[0], note) for note in scale.notes)
         self.ax.text(
@@ -585,7 +673,7 @@ class FretboardScaleViewer:
                 linewidth=1.2,
             )
             chord_ax.add_patch(marker)
-            chord_ax.text(string_offset, y, label, ha="center", va="center", fontsize=7, color="white")
+            chord_ax.text(string_offset, y, label, ha="center", va="center", fontsize=7, color="black")
 
     @staticmethod
     def _preferred_label_for_pitch(pitch: int, notes: tuple[str, ...]) -> str:
@@ -593,6 +681,174 @@ class FretboardScaleViewer:
             if note_to_pitch(note) == pitch:
                 return note
         raise ValueError(f"Pitch {pitch} not found in scale notes")
+
+
+class PianoScaleViewer:
+    def __init__(
+        self,
+        family_order: list[str],
+        scales: dict[tuple[str, str, str], ScaleDefinition],
+        octaves: int,
+        start_note: str,
+        start_family: str,
+        start_mode: str,
+        start_key: str,
+        start_display: str,
+    ) -> None:
+        self.family_order = family_order
+        self.scales = scales
+        self.octaves = octaves
+        self.family_to_modes = self._build_family_mode_index()
+
+        self.family_index = self.family_order.index(start_family)
+        self.mode_index = self.family_to_modes[start_family].index(start_mode)
+        self.key_index = KEY_ORDER.index(start_key)
+        self.display_mode_index = DISPLAY_MODES.index(start_display)
+        self.start_midi = self._start_note_to_midi(start_note)
+        self.keys = build_piano_keys(self.start_midi, self.octaves)
+
+        self.fig, self.ax = plt.subplots(figsize=(16, 5))
+        self.fig.subplots_adjust(bottom=0.24, left=0.04, right=0.96, top=0.84)
+        self._build_buttons()
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key_press)
+        self.redraw()
+
+    def _build_family_mode_index(self) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {family: [] for family in self.family_order}
+        for family, mode, key in self.scales:
+            if key == "C":
+                index[family].append(mode)
+        return index
+
+    def _start_note_to_midi(self, note: str) -> int:
+        match = re.match(r"^([A-G](?:#|b|x){0,2})(-?\d+)$", note)
+        if not match:
+            raise ValueError("Start note must look like C2, F#3, or Bb1")
+        name, octave_text = match.groups()
+        octave = int(octave_text)
+        return (octave + 1) * 12 + note_to_pitch(name)
+
+    def current_family(self) -> str:
+        return self.family_order[self.family_index]
+
+    def current_mode(self) -> str:
+        return self.family_to_modes[self.current_family()][self.mode_index]
+
+    def current_key(self) -> str:
+        return KEY_ORDER[self.key_index]
+
+    def current_scale(self) -> ScaleDefinition:
+        return self.scales[(self.current_family(), self.current_mode(), self.current_key())]
+
+    def current_display_mode(self) -> str:
+        return DISPLAY_MODES[self.display_mode_index]
+
+    def _build_buttons(self) -> None:
+        specs = [
+            ("Prev Family", [0.05, 0.09, 0.12, 0.07], lambda event: self.shift_family(-1)),
+            ("Next Family", [0.18, 0.09, 0.12, 0.07], lambda event: self.shift_family(1)),
+            ("Prev Mode", [0.33, 0.09, 0.11, 0.07], lambda event: self.shift_mode(-1)),
+            ("Next Mode", [0.45, 0.09, 0.11, 0.07], lambda event: self.shift_mode(1)),
+            ("Prev Key", [0.60, 0.09, 0.10, 0.07], lambda event: self.shift_key(-1)),
+            ("Next Key", [0.71, 0.09, 0.10, 0.07], lambda event: self.shift_key(1)),
+            ("Toggle View", [0.83, 0.09, 0.11, 0.07], lambda event: self.shift_display_mode(1)),
+        ]
+        self.buttons = []
+        for label, rect, handler in specs:
+            button_ax = self.fig.add_axes(rect)
+            button = Button(button_ax, label)
+            button.on_clicked(handler)
+            self.buttons.append(button)
+
+    def shift_family(self, delta: int) -> None:
+        self.family_index = (self.family_index + delta) % len(self.family_order)
+        self.mode_index %= len(self.family_to_modes[self.current_family()])
+        self.redraw()
+
+    def shift_mode(self, delta: int) -> None:
+        modes = self.family_to_modes[self.current_family()]
+        self.mode_index = (self.mode_index + delta) % len(modes)
+        self.redraw()
+
+    def shift_key(self, delta: int) -> None:
+        self.key_index = (self.key_index + delta) % len(KEY_ORDER)
+        self.redraw()
+
+    def shift_display_mode(self, delta: int) -> None:
+        self.display_mode_index = (self.display_mode_index + delta) % len(DISPLAY_MODES[:2])
+        self.redraw()
+
+    def _on_key_press(self, event) -> None:
+        keymap = {
+            "left": lambda: self.shift_key(-1),
+            "right": lambda: self.shift_key(1),
+            "up": lambda: self.shift_mode(1),
+            "down": lambda: self.shift_mode(-1),
+            "[": lambda: self.shift_family(-1),
+            "]": lambda: self.shift_family(1),
+            "n": lambda: self.set_display_mode("Notes"),
+            "i": lambda: self.set_display_mode("Intervals"),
+        }
+        handler = keymap.get(event.key)
+        if handler:
+            handler()
+
+    def set_display_mode(self, mode: str) -> None:
+        self.display_mode_index = DISPLAY_MODES.index(mode)
+        self.redraw()
+
+    def redraw(self) -> None:
+        scale = self.current_scale()
+        scale_pitches = {note_to_pitch(note) for note in scale.notes}
+        root_pitch = note_to_pitch(scale.notes[0])
+        interval_lookup = {note_to_pitch(note): interval_label(scale.notes[0], note) for note in scale.notes}
+
+        white_keys = [key for key in self.keys if key.is_white]
+        self.ax.clear()
+        self.ax.set_xlim(-0.2, len(white_keys) + 0.2)
+        self.ax.set_ylim(0, 1.55)
+        self.ax.axis("off")
+        self.ax.set_facecolor("#efe7d4")
+
+        for key in white_keys:
+            is_active = key.pitch in scale_pitches
+            is_root = key.pitch == root_pitch
+            face = "#d94841" if is_root else "#f7fbff" if not is_active else "#b8e3dc"
+            rect = Rectangle((key.x, 0), 1.0, 1.35, facecolor=face, edgecolor="#5b4636", linewidth=1.5, zorder=1)
+            self.ax.add_patch(rect)
+            label = interval_lookup[key.pitch] if self.current_display_mode() == "Intervals" and is_active else pitch_to_display_label(key.pitch)
+            text_color = "#ffffff" if is_root else "#1f2933"
+            self.ax.text(key.x + 0.5, 0.23, label if is_active else key.label[:-1], ha="center", va="center", fontsize=8, color=text_color, zorder=3)
+            self.ax.text(key.x + 0.5, 0.08, key.label, ha="center", va="center", fontsize=7, color="#4f3422", zorder=3)
+
+        for key in [key for key in self.keys if not key.is_white]:
+            is_active = key.pitch in scale_pitches
+            is_root = key.pitch == root_pitch
+            face = "#d94841" if is_root else "#1f2933" if not is_active else "#2a9d8f"
+            rect = Rectangle((key.x, 0.54), 0.64, 0.74, facecolor=face, edgecolor="#0f1720", linewidth=1.2, zorder=4)
+            self.ax.add_patch(rect)
+            if is_active:
+                label = interval_lookup[key.pitch] if self.current_display_mode() == "Intervals" else pitch_to_display_label(key.pitch)
+                self.ax.text(key.x + 0.32, 0.87, label, ha="center", va="center", fontsize=7, color="black", zorder=5)
+
+        formula = "  ".join(interval_label(scale.notes[0], note) for note in scale.notes)
+        self.ax.set_title(
+            f"Piano Scale Viewer\n{scale.key} {scale.mode} [{scale.family}]",
+            fontsize=16,
+            fontweight="bold",
+            color="#1f2933",
+            pad=16,
+        )
+        self.ax.text(
+            len(white_keys) / 2,
+            1.45,
+            f"View: {self.current_display_mode()} | Formula: {formula} | Arrows change key/mode, [ ] family, n/i view",
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#4f3422",
+        )
+        self.fig.canvas.draw_idle()
 
 
 def validate_selection(
@@ -622,7 +878,12 @@ def validate_selection(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Interactive 8-string guitar fretboard viewer for the scales in scale-modes-reference.md."
+        description="Interactive guitar or piano scale viewer for the scales in scale-modes-reference.md."
+    )
+    parser.add_argument(
+        "--instrument",
+        choices=INSTRUMENTS,
+        help="Choose which viewer to launch. If omitted, the program asks at startup.",
     )
     parser.add_argument("--family", default="Major Scale", help="Scale family heading from the markdown reference.")
     parser.add_argument("--mode", default="Ionian", help="Mode name within the selected family.")
@@ -649,7 +910,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1,
         help="Initial diatonic chord degree to inspect in chord view, from 1 to 7.",
     )
+    parser.add_argument("--octaves", type=int, default=3, help="Number of piano octaves to draw.")
+    parser.add_argument("--start-note", default="C2", help="Piano keyboard start note, like C2 or F1.")
     return parser
+
+
+def prompt_for_instrument() -> str:
+    while True:
+        choice = input("Choose instrument ([g]uitar / [p]iano): ").strip().lower()
+        if choice in {"g", "guitar"}:
+            return "guitar"
+        if choice in {"p", "piano"}:
+            return "piano"
+        print("Please enter 'guitar' or 'piano'.")
 
 
 def main() -> None:
@@ -657,19 +930,32 @@ def main() -> None:
     if args.save:
         plt.switch_backend("Agg")
 
+    instrument = args.instrument or prompt_for_instrument()
     family_order, scales = parse_scale_reference(REFERENCE_PATH)
     family, mode, key = validate_selection(family_order, scales, args.family, args.mode, args.key)
 
-    viewer = FretboardScaleViewer(
-        family_order=family_order,
-        scales=scales,
-        frets=args.frets,
-        start_family=family,
-        start_mode=mode,
-        start_key=key,
-        start_display=args.display.title(),
-        start_degree=max(0, min(6, args.degree - 1)),
-    )
+    if instrument == "piano":
+        viewer = PianoScaleViewer(
+            family_order=family_order,
+            scales=scales,
+            octaves=max(1, args.octaves),
+            start_note=args.start_note,
+            start_family=family,
+            start_mode=mode,
+            start_key=key,
+            start_display="Intervals" if args.display.title() == "Intervals" else "Notes",
+        )
+    else:
+        viewer = FretboardScaleViewer(
+            family_order=family_order,
+            scales=scales,
+            frets=args.frets,
+            start_family=family,
+            start_mode=mode,
+            start_key=key,
+            start_display=args.display.title(),
+            start_degree=max(0, min(6, args.degree - 1)),
+        )
 
     if args.save:
         viewer.fig.savefig(args.save, dpi=180, bbox_inches="tight")
