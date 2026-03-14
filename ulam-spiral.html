@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ulam Spiral — Prime Number Visualizer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: #0d1117;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+      color: #e6edf3;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      font-size: 0.9rem;
+      color: #8b949e;
+      margin-bottom: 1rem;
+    }
+    .controls {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    .controls label { font-size: 0.85rem; }
+    input[type="range"] {
+      width: 140px;
+      accent-color: #58a6ff;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #e6edf3;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button:hover { background: #30363d; }
+    .stats {
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-top: 0.5rem;
+    }
+    canvas {
+      border-radius: 8px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+      cursor: crosshair;
+    }
+    .legend {
+      display: flex;
+      gap: 1.5rem;
+      font-size: 0.8rem;
+      color: #8b949e;
+      margin-top: 1rem;
+    }
+    .swatch { width: 12px; height: 12px; display: inline-block; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Ulam Spiral</h1>
+  <p class="subtitle">Primes arranged in a spiral — spot the diagonal patterns</p>
+
+  <div class="controls">
+    <label>
+      Size: <span id="sizeVal">201</span>×<span id="sizeVal2">201</span>
+      <input type="range" id="size" min="51" max="401" step="50" value="201">
+    </label>
+    <label>
+      Dot size: <span id="dotVal">2</span>
+      <input type="range" id="dotSize" min="1" max="5" value="2">
+    </label>
+    <button id="rerender">Redraw</button>
+  </div>
+
+  <canvas id="ulam" width="800" height="800"></canvas>
+
+  <p class="stats" id="stats">Rendering…</p>
+  <div class="legend">
+    <span><span class="swatch" style="background:#58a6ff"></span> Prime</span>
+    <span><span class="swatch" style="background:#30363d"></span> Composite / Empty</span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('ulam');
+    const ctx = canvas.getContext('2d');
+
+    function isPrime(n) {
+      if (n < 2) return false;
+      for (let i = 2; i * i <= n; i++) if (n % i === 0) return false;
+      return true;
+    }
+
+    function spiralCoords(n, sideLen) {
+      if (n === 1) return [(sideLen - 1) / 2, (sideLen - 1) / 2];
+      const ring = Math.floor((Math.sqrt(n - 1) + 1) / 2);
+      const sideLength = 2 * ring;
+      const start = (2 * ring - 1) ** 2;
+      const pos = n - start - 1;
+      const edge = Math.floor(pos / sideLength);
+      const idx = pos % sideLength;
+      const cx = (sideLen - 1) / 2;
+      const cy = (sideLen - 1) / 2;
+
+      if (edge === 0) return [cx + ring - idx, cy - ring];
+      if (edge === 1) return [cx - ring, cy - ring + idx];
+      if (edge === 2) return [cx - ring + idx, cy + ring];
+      return [cx + ring, cy + ring - idx];
+    }
+
+    function render() {
+      const size = +document.getElementById('size').value;
+      const dotSize = +document.getElementById('dotSize').value;
+      const sideLen = size;
+      const maxN = sideLen * sideLen;
+
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const scale = Math.min(cw, ch) / sideLen;
+
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, cw, ch);
+
+      const t0 = performance.now();
+      let primeCount = 0;
+
+      for (let n = 1; n <= maxN; n++) {
+        if (!isPrime(n)) continue;
+        primeCount++;
+        const [x, y] = spiralCoords(n, sideLen);
+        ctx.fillStyle = '#58a6ff';
+        ctx.beginPath();
+        ctx.arc(
+          (x + 0.5) * scale,
+          (y + 0.5) * scale,
+          dotSize,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+      }
+
+      const elapsed = (performance.now() - t0).toFixed(0);
+      document.getElementById('stats').textContent =
+        `${primeCount.toLocaleString()} primes up to ${maxN.toLocaleString()} • ${elapsed}ms`;
+    }
+
+    document.getElementById('size').oninput = function () {
+      const v = this.value;
+      document.getElementById('sizeVal').textContent = v;
+      document.getElementById('sizeVal2').textContent = v;
+    };
+
+    document.getElementById('dotSize').oninput = function () {
+      document.getElementById('dotVal').textContent = this.value;
+    };
+
+    document.getElementById('size').dispatchEvent(new Event('input'));
+
+    document.getElementById('size').onchange = render;
+    document.getElementById('dotSize').onchange = render;
+    document.getElementById('rerender').onclick = render;
+
+    render();
+  </script>
+</body>
+</html>
