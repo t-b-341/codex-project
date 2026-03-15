@@ -18,6 +18,7 @@ KEY_ORDER = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
 NOTE_TO_PITCH = {
     "C": 0,
     "B#": 0,
+    "Dbb": 0,
     "C#": 1,
     "Db": 1,
     "Cx": 2,
@@ -69,6 +70,43 @@ DISPLAY_MODES = ["Notes", "Intervals", "Chords"]
 ROMAN_NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII"]
 INSTRUMENTS = ["guitar", "piano"]
 WHITE_PITCHES = {0, 2, 4, 5, 7, 9, 11}
+CHORD_ROOT_LABELS = {
+    0: "C",
+    1: "C#",
+    2: "D",
+    3: "Eb",
+    4: "E",
+    5: "F",
+    6: "F#",
+    7: "G",
+    8: "Ab",
+    9: "A",
+    10: "Bb",
+    11: "B",
+}
+CHORD_PATTERNS = [
+    ("maj9", frozenset({0, 2, 4, 7, 11})),
+    ("9", frozenset({0, 2, 4, 7, 10})),
+    ("m9", frozenset({0, 2, 3, 7, 10})),
+    ("maj7", frozenset({0, 4, 7, 11})),
+    ("7", frozenset({0, 4, 7, 10})),
+    ("m7", frozenset({0, 3, 7, 10})),
+    ("m(maj7)", frozenset({0, 3, 7, 11})),
+    ("dim7", frozenset({0, 3, 6, 9})),
+    ("m7b5", frozenset({0, 3, 6, 10})),
+    ("6", frozenset({0, 4, 7, 9})),
+    ("m6", frozenset({0, 3, 7, 9})),
+    ("add9", frozenset({0, 2, 4, 7})),
+    ("m(add9)", frozenset({0, 2, 3, 7})),
+    ("7sus4", frozenset({0, 5, 7, 10})),
+    ("sus2", frozenset({0, 2, 7})),
+    ("sus4", frozenset({0, 5, 7})),
+    ("aug", frozenset({0, 4, 8})),
+    ("dim", frozenset({0, 3, 6})),
+    ("m", frozenset({0, 3, 7})),
+    ("", frozenset({0, 4, 7})),
+    ("5", frozenset({0, 7})),
+]
 
 
 @dataclass(frozen=True)
@@ -102,6 +140,14 @@ class PianoKey:
     is_white: bool
     x: float
     label: str
+
+
+@dataclass(frozen=True)
+class IdentifiedChord:
+    name: str
+    root_pitch: int
+    bass_pitch: int
+    pitch_classes: tuple[int, ...]
 
 
 def parse_scale_reference(path: Path) -> tuple[list[str], dict[tuple[str, str, str], ScaleDefinition]]:
@@ -307,6 +353,58 @@ def generate_chord_positions(chord: ChordDefinition, max_fret: int) -> list[Chor
     return unique
 
 
+def chord_root_label(pitch: int) -> str:
+    try:
+        return CHORD_ROOT_LABELS[pitch]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported pitch class: {pitch}") from exc
+
+
+def identify_chord_name(selected_positions: set[tuple[int, int]]) -> IdentifiedChord | None:
+    if not selected_positions:
+        return None
+
+    pitch_classes = {
+        (note_to_pitch(STANDARD_TUNING_8_STRING[string_index]) + fret) % 12
+        for string_index, fret in selected_positions
+    }
+    if not pitch_classes:
+        return None
+
+    bass_string, bass_fret = max(selected_positions, key=lambda pos: (pos[0], pos[1]))
+    bass_pitch = (note_to_pitch(STANDARD_TUNING_8_STRING[bass_string]) + bass_fret) % 12
+
+    matches: list[tuple[int, str, int]] = []
+    for root_pitch in sorted(pitch_classes):
+        intervals = frozenset((pitch - root_pitch) % 12 for pitch in pitch_classes)
+        for quality, pattern in CHORD_PATTERNS:
+            if intervals != pattern:
+                continue
+            priority = 0 if root_pitch == bass_pitch else 1
+            matches.append((priority, quality, root_pitch))
+
+    ordered_pitch_classes = tuple(sorted(pitch_classes))
+    if matches:
+        matches.sort(key=lambda item: (item[0], next(index for index, candidate in enumerate(CHORD_PATTERNS) if candidate[0] == item[1]), item[2]))
+        _, quality, root_pitch = matches[0]
+        name = f"{chord_root_label(root_pitch)}{quality}"
+        if bass_pitch != root_pitch:
+            name = f"{name}/{chord_root_label(bass_pitch)}"
+        return IdentifiedChord(
+            name=name,
+            root_pitch=root_pitch,
+            bass_pitch=bass_pitch,
+            pitch_classes=ordered_pitch_classes,
+        )
+
+    return IdentifiedChord(
+        name="Unknown chord",
+        root_pitch=bass_pitch,
+        bass_pitch=bass_pitch,
+        pitch_classes=ordered_pitch_classes,
+    )
+
+
 def build_piano_keys(start_midi: int, octaves: int) -> list[PianoKey]:
     white_positions: dict[int, float] = {}
     keys: list[PianoKey] = []
@@ -372,6 +470,7 @@ class FretboardScaleViewer:
         self.key_index = KEY_ORDER.index(start_key)
         self.display_mode_index = DISPLAY_MODES.index(start_display)
         self.chord_degree_index = start_degree % 7
+        self.selected_positions: set[tuple[int, int]] = set()
 
         self.fig, self.ax = plt.subplots(figsize=(16, 7))
         self.fig.subplots_adjust(bottom=0.28, left=0.06, right=0.72, top=0.88)
@@ -380,6 +479,7 @@ class FretboardScaleViewer:
         ]
         self._build_buttons()
         self.fig.canvas.mpl_connect("key_press_event", self._on_key_press)
+        self.fig.canvas.mpl_connect("button_press_event", self._on_mouse_click)
         self.redraw()
 
     def _build_family_mode_index(self) -> dict[str, list[str]]:
@@ -461,6 +561,9 @@ class FretboardScaleViewer:
             "n": lambda: self.set_display_mode("Notes"),
             "i": lambda: self.set_display_mode("Intervals"),
             "c": lambda: self.set_display_mode("Chords"),
+            "backspace": self.clear_selected_notes,
+            "delete": self.clear_selected_notes,
+            "escape": self.clear_selected_notes,
         }
         handler = keymap.get(event.key)
         if handler:
@@ -468,6 +571,38 @@ class FretboardScaleViewer:
 
     def set_display_mode(self, mode: str) -> None:
         self.display_mode_index = DISPLAY_MODES.index(mode)
+        self.redraw()
+
+    def clear_selected_notes(self) -> None:
+        self.selected_positions.clear()
+        self.redraw()
+
+    def _position_from_axes_coords(self, xdata: float, ydata: float) -> tuple[int, int] | None:
+        if not (-0.5 <= ydata <= len(STANDARD_TUNING_8_STRING) - 0.5):
+            return None
+        if not (-0.5 <= xdata <= self.frets + 0.5):
+            return None
+
+        string_index = int(ydata + 0.5)
+        if not 0 <= string_index < len(STANDARD_TUNING_8_STRING):
+            return None
+
+        # Fret regions are bounded by fret wires: [0,1) = fret 1, [1,2) = fret 2, etc.
+        # Reserve the area left of the nut for the open string marker.
+        fret = 0 if xdata < 0 else int(xdata) + 1
+        fret = max(0, min(self.frets, fret))
+        return string_index, fret
+
+    def _on_mouse_click(self, event) -> None:
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        position = self._position_from_axes_coords(event.xdata, event.ydata)
+        if position is None:
+            return
+        if position in self.selected_positions:
+            self.selected_positions.remove(position)
+        else:
+            self.selected_positions.add(position)
         self.redraw()
 
     def redraw(self) -> None:
@@ -479,6 +614,7 @@ class FretboardScaleViewer:
         active_chord = diatonic_chords[self.chord_degree_index]
         active_chord_pitches = {note_to_pitch(note) for note in active_chord.notes}
         active_root_pitch = note_to_pitch(active_chord.notes[0]) if self.current_display_mode() == "Chords" else root_pitch
+        selected_chord = identify_chord_name(self.selected_positions)
 
         self.ax.clear()
         self.ax.set_xlim(-0.75, self.frets + 0.75)
@@ -551,11 +687,45 @@ class FretboardScaleViewer:
                 self.ax.add_patch(marker)
                 self.ax.text(x, y, note_name, ha="center", va="center", fontsize=8, color="black", zorder=4)
 
+        for string_index, fret in sorted(self.selected_positions):
+            pitch = (note_to_pitch(STANDARD_TUNING_8_STRING[string_index]) + fret) % 12
+            x = -0.18 if fret == 0 else fret - 0.5
+            y = string_index
+            is_root = selected_chord is not None and pitch == selected_chord.root_pitch
+            marker = Circle(
+                (x, y),
+                0.27 if fret == 0 else 0.26,
+                facecolor="#f4d35e" if not is_root else "#f28482",
+                edgecolor="#6b4f1d" if not is_root else "#7f1d1d",
+                linewidth=2.2,
+                zorder=5,
+            )
+            self.ax.add_patch(marker)
+            self.ax.text(
+                x,
+                y,
+                chord_root_label(pitch),
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="#111827",
+                zorder=6,
+                fontweight="bold",
+            )
+
         formula_text = "  ".join(interval_label(scale.notes[0], note) for note in scale.notes)
+        selected_note_text = (
+            "  ".join(chord_root_label(pitch) for pitch in selected_chord.pitch_classes)
+            if selected_chord is not None
+            else "none"
+        )
         self.ax.text(
             self.frets / 2,
             len(STANDARD_TUNING_8_STRING) - 0.02,
-            f"View: {self.current_display_mode()} | Formula: {formula_text} | Arrows change key/mode, [ ] family, n/i/c view, ,/. chord degree",
+            (
+                f"View: {self.current_display_mode()} | Formula: {formula_text} | "
+                f"Click notes to build a chord, backspace clears, arrows change key/mode, [ ] family, n/i/c view, ,/. chord degree"
+            ),
             ha="center",
             va="bottom",
             fontsize=10,
@@ -563,16 +733,22 @@ class FretboardScaleViewer:
         )
         self.ax.set_title(
             f"8-String Guitar Fretboard ({'-'.join(STANDARD_TUNING_8_STRING)})\n"
-            f"{scale.key} {scale.mode} [{scale.family}]",
+            f"{scale.key} {scale.mode} [{scale.family}]"
+            f"{'' if selected_chord is None else f'   |   Clicked Chord: {selected_chord.name} ({selected_note_text})'}",
             fontsize=16,
             fontweight="bold",
             color="#1f2933",
             pad=20,
         )
-        self._draw_chord_panel(diatonic_chords)
+        self._draw_chord_panel(diatonic_chords, selected_chord, selected_note_text)
         self.fig.canvas.draw_idle()
 
-    def _draw_chord_panel(self, diatonic_chords: list[ChordDefinition]) -> None:
+    def _draw_chord_panel(
+        self,
+        diatonic_chords: list[ChordDefinition],
+        selected_chord: IdentifiedChord | None,
+        selected_note_text: str,
+    ) -> None:
         active_chord = diatonic_chords[self.chord_degree_index]
         positions = generate_chord_positions(active_chord, self.frets)
 
@@ -603,6 +779,25 @@ class FretboardScaleViewer:
             fontsize=10,
             color="#1f2933",
         )
+        self.fig.text(
+            0.76,
+            0.805,
+            (
+                f"Clicked chord: {selected_chord.name}"
+                if selected_chord is not None
+                else "Clicked chord: select notes on the fretboard"
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#1f2933",
+        )
+        self.fig.text(
+            0.76,
+            0.775,
+            f"Clicked notes: {selected_note_text}",
+            fontsize=9,
+            color="#4f3422",
+        )
 
         for index, chord_ax in enumerate(self.chord_axes):
             chord_ax.clear()
@@ -622,58 +817,76 @@ class FretboardScaleViewer:
     ) -> None:
         strings = position.strings
         frets = position.frets
+        fingerings = dict(zip(strings, frets))
         used_frets = [fret for fret in frets if fret > 0]
         base_fret = min(used_frets) if used_frets and min(used_frets) > 1 else 1
-        last_fret = max(max(frets), base_fret + 3)
+        total_strings = len(STANDARD_TUNING_8_STRING)
 
-        chord_ax.set_xlim(-0.3, len(strings) - 0.7)
-        chord_ax.set_ylim(-0.6, 4.4)
+        chord_ax.set_xlim(-1.1, total_strings - 0.1)
+        chord_ax.set_ylim(-1.05, 4.5)
         chord_ax.invert_yaxis()
 
-        for string_offset in range(len(strings)):
-            chord_ax.plot([string_offset, string_offset], [0, 4], color="#8b735f", linewidth=1.4)
+        for x in range(total_strings):
+            chord_ax.plot([x, x], [0, 4], color="#8b735f", linewidth=1.4)
         for fret_offset in range(5):
-            linewidth = 2.5 if fret_offset == 0 and base_fret == 1 else 1.2
-            chord_ax.plot([0, len(strings) - 1], [fret_offset, fret_offset], color="#8b735f", linewidth=linewidth)
+            linewidth = 2.8 if fret_offset == 0 and base_fret == 1 else 1.2
+            chord_ax.plot([0, total_strings - 1], [fret_offset, fret_offset], color="#8b735f", linewidth=linewidth)
 
         chord_ax.text(
             0,
-            -0.35,
-            f"Pos {diagram_number}: strings {strings[0] + 1}-{strings[-1] + 1}",
+            -0.72,
+            f"Pos {diagram_number}",
             ha="left",
             va="center",
             fontsize=8,
             color="#1f2933",
+            fontweight="bold",
         )
         chord_ax.text(
-            len(strings) - 1,
-            -0.35,
-            f"fret {base_fret}",
+            total_strings - 1,
+            -0.72,
+            f"strings {max(strings) + 1}-{min(strings) + 1}",
             ha="right",
             va="center",
             fontsize=8,
             color="#4f3422",
         )
+        if base_fret > 1:
+            chord_ax.text(
+                -0.55,
+                0.5,
+                f"{base_fret}fr",
+                ha="right",
+                va="center",
+                fontsize=8,
+                color="#4f3422",
+            )
 
-        for string_offset, (string_index, fret) in enumerate(zip(strings, frets)):
+        for string_index in range(total_strings):
+            x = total_strings - 1 - string_index
+            fret = fingerings.get(string_index)
+            if fret is None:
+                chord_ax.text(x, -0.18, "X", ha="center", va="center", fontsize=9, color="#8b735f")
+                continue
+
             pitch = (note_to_pitch(STANDARD_TUNING_8_STRING[string_index]) + fret) % 12
             note_name = self._preferred_label_for_pitch(pitch, chord.notes)
             label = interval_label(chord.notes[0], note_name)
             if fret == 0:
-                chord_ax.text(string_offset, -0.1, "O", ha="center", va="center", fontsize=9, color="#155e63")
-                y = 0.5
-            else:
-                y = fret - base_fret + 0.5
+                chord_ax.text(x, -0.18, "O", ha="center", va="center", fontsize=9, color="#155e63")
+                continue
+
+            y = fret - base_fret + 0.5
             is_root = pitch == note_to_pitch(chord.notes[0])
             marker = Circle(
-                (string_offset, y),
+                (x, y),
                 0.18,
                 facecolor="#d94841" if is_root else "#2a9d8f",
                 edgecolor="#641220" if is_root else "#155e63",
                 linewidth=1.2,
             )
             chord_ax.add_patch(marker)
-            chord_ax.text(string_offset, y, label, ha="center", va="center", fontsize=7, color="black")
+            chord_ax.text(x, y, label, ha="center", va="center", fontsize=7, color="black")
 
     @staticmethod
     def _preferred_label_for_pitch(pitch: int, notes: tuple[str, ...]) -> str:
@@ -889,8 +1102,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", default="Ionian", help="Mode name within the selected family.")
     parser.add_argument(
         "--key",
-        default="Gb",
-        help="Starting key. Uses the markdown spellings, so F# standard defaults to Gb for the scale selector.",
+        default="C",
+        help="Starting key. Uses the markdown spellings, e.g. C for C major (Ionian).",
     )
     parser.add_argument("--frets", type=int, default=24, help="Number of frets to draw.")
     parser.add_argument(
@@ -910,7 +1123,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1,
         help="Initial diatonic chord degree to inspect in chord view, from 1 to 7.",
     )
-    parser.add_argument("--octaves", type=int, default=3, help="Number of piano octaves to draw.")
+    parser.add_argument("--octaves", type=int, default=1, help="Number of piano octaves to draw.")
     parser.add_argument("--start-note", default="C2", help="Piano keyboard start note, like C2 or F1.")
     return parser
 
